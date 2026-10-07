@@ -1,0 +1,14 @@
+[package]
+name = "artcraft-ui-martensite"
+version = "0.42.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Sovereign retained-mode unified creative hub UI for ArtCraft powered by Martensite"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+
+[dev-dependencies]
+proptest = "1.4"
