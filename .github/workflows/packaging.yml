@@ -11,97 +11,137 @@ permissions:
   contents: write
   packages: write
 
+env:
+  SQLX_OFFLINE: 'true'
+  VITE_ENVIRONMENT_TYPE: 'production'
+
 jobs:
-  # 1. Linux Packaging (.deb, .rpm, .flatpak via cargo-generate-rpm & cargo-deb)
+  # 1. Linux Packaging (.deb / .AppImage via tauri-action)
   package-linux:
-    name: Linux (${{ matrix.target.arch }} / ${{ matrix.target.format }})
+    name: Linux (deb / AppImage)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - { arch: x86_64, triple: x86_64-unknown-linux-gnu, format: deb }
-          - { arch: x86_64, triple: x86_64-unknown-linux-gnu, format: rpm }
-          - { arch: aarch64, triple: aarch64-unknown-linux-gnu, format: deb }
-          - { arch: aarch64, triple: aarch64-unknown-linux-gnu, format: rpm }
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target.triple }}
-      - uses: taiki-e/install-action@cargo-deb
-      - uses: taiki-e/install-action@cargo-generate-rpm
-      - name: Build and Package
+      - name: Install Tauri Linux dependencies
         run: |
-          if [ "${{ matrix.target.format }}" = "deb" ]; then
-            cargo deb --target ${{ matrix.target.triple }}
-          else
-            cargo generate-rpm --target ${{ matrix.target.triple }}
-          fi
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: npx nx run artcraft:build
+      - name: Disable beforeBuildCommand (frontend already built)
+        working-directory: crates/desktop/artcraft
+        run: |
+          cp tauri.conf.json tauri.conf.json.bak
+          jq '.build.beforeBuildCommand = ""' tauri.conf.json > tauri.conf.json.tmp
+          mv tauri.conf.json.tmp tauri.conf.json
+      - name: Build Tauri bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: ./crates/desktop/artcraft
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-${{ matrix.target.arch }}-${{ matrix.target.format }}
-          path: target/${{ matrix.target.triple }}/*/*.${{ matrix.target.format }}
+          name: linux-tauri-bundles
+          path: crates/desktop/artcraft/target/release/bundle/**
 
-  # Flatpak Container Sandbox Build
-  package-flatpak:
-    name: Linux Flatpak (x86_64 & aarch64)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v1
-        with:
-          bundle: true
-          manifest-path: packaging/flatpak/org.artcraft.app.yml
-          run-tests: true
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-flatpak
-          path: '*.flatpak'
-
-  # 2. macOS Packaging (.dmg, Universal / Apple Silicon + Intel)
+  # 2. macOS Packaging (Universal .dmg via tauri-action)
   package-macos:
     name: macOS (Universal .dmg)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
-      - uses: taiki-e/install-action@cargo-bundle
-      - name: Compile and Lipoo Universal Binary
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: npx nx run artcraft:build
+      - name: Select macOS Tauri config and disable beforeBuildCommand
+        working-directory: crates/desktop/artcraft
         run: |
-          cargo build --release --target aarch64-apple-darwin
-          cargo build --release --target x86_64-apple-darwin
-          mkdir -p target/universal-apple-darwin/release
-          lipo -create             target/aarch64-apple-darwin/release/app             target/x86_64-apple-darwin/release/app             -output target/universal-apple-darwin/release/app
-      - name: Create DMG
-        run: hdiutil create -volname "ArtCraft App" -srcfolder target/universal-apple-darwin/release -ov -format UDZO app.dmg
+          cp tauri-mac.conf.json tauri.conf.json
+          jq '.build.beforeBuildCommand = ""' tauri.conf.json > tauri.conf.json.tmp
+          mv tauri.conf.json.tmp tauri.conf.json
+      - name: Build Tauri bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: ./crates/desktop/artcraft
+          args: --target universal-apple-darwin
       - uses: actions/upload-artifact@v4
         with:
           name: macos-universal-dmg
-          path: app.dmg
+          path: crates/desktop/artcraft/target/universal-apple-darwin/release/bundle/**
 
-  # 3. Windows Packaging (.exe / .msi across x64 and ARM64)
+  # 3. Windows Packaging (.msi / .exe via tauri-action)
   package-windows:
-    name: Windows (${{ matrix.target.arch }})
+    name: Windows (x64)
     runs-on: windows-latest
-    strategy:
-      matrix:
-        target:
-          - { arch: x64, triple: x86_64-pc-windows-msvc }
-          - { arch: arm64, triple: aarch64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target.triple }}
-      - uses: taiki-e/install-action@cargo-wix
-      - name: Compile and Build Windows MSI
+      - name: Install build dependencies
+        shell: cmd
         run: |
-          cargo build --release --target ${{ matrix.target.triple }}
-          cargo wix --target ${{ matrix.target.triple }} --nocapture
+          choco install cmake -y
+          choco install strawberryperl -y
+          choco install pkgconfiglite -y
+          choco install llvm -y
+          choco install nasm -y
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Build frontend
+        working-directory: frontend
+        shell: pwsh
+        run: |
+          $env:NODE_OPTIONS="--max-old-space-size=8192"
+          npx nx run artcraft:build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Disable beforeBuildCommand (frontend already built)
+        working-directory: crates/desktop/artcraft
+        shell: pwsh
+        run: |
+          Copy-Item tauri.conf.json tauri.conf.json.bak
+          $config = Get-Content tauri.conf.json | ConvertFrom-Json
+          $config.build.beforeBuildCommand = ""
+          $config | ConvertTo-Json -Depth 10 | Set-Content tauri.conf.json
+      - name: Build Tauri bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: ./crates/desktop/artcraft
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-${{ matrix.target.arch }}-installer
-          path: target/wix/*.msi
+          name: windows-x64-installer
+          path: crates/desktop/artcraft/target/release/bundle/**
