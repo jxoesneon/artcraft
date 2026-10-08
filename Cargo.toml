@@ -48,6 +48,7 @@ default-members = ["crates/desktop/artcraft"]
 publish = false
 
 [workspace.dependencies]
+tracing = "0.1"
 artcraft_api_defs = { path = "crates/api_clients/artcraft/artcraft_api_defs" }
 artcraft_client = { path = "crates/api_clients/artcraft/artcraft_client" }
 artcraft_client_identity = { path = "crates/lib/artcraft_client_identity" }
